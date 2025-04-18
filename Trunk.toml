@@ -1,0 +1,12 @@
+# Trunk configuration file - https://trunkrs.dev/assets/
+
+[build]
+# The index.html file to drive the build pipeline.
+# Relative to the Trunk.toml file.
+target = "index.html"
+
+# Explicitly point to the Cargo.toml within the frontend directory.
+manifest_path = "frontend/Cargo.toml"
+
+# Remove the 'crate' key as manifest_path implies the crate location.
+# crate = "frontend" 

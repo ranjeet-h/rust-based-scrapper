@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ruscraper</title>
+    <!-- Trunk will inject style links here -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦀</text></svg>">
+    <style>
+        /* Basic CSS reset and styles for the loading spinner */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrollbars during loading */
+            background: #202020; /* Dark background */
+            color: #ccc;
+            font-family: sans-serif;
+        }
+        canvas {
+            outline: none; /* No blue border on focus */
+        }
+        .loading-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            text-align: center;
+        }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 4px solid #fff;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <!-- This is where the egui app will be rendered -->
+    <canvas id="the_canvas_id"></canvas>
+
+    <div id="loading_text" class="loading-container">
+        <div class="spinner"></div>
+        <p>Loading Ruscraper...</p>
+    </div>
+
+    <!-- Trunk will inject a script tag here to load and run the Wasm module -->
+    <!-- Based on the main.rs, we need a loading indicator -->
+    <!-- <div id="loading_text" class="loading-container">
+        <div class="spinner"></div>
+        <p>Loading Ruscraper...</p>
+    </div> -->
+
+    <!-- Make sure the canvas is created before the script runs -->
+    <script>
+        // Simple script to remove loading text once Wasm is ready (main.rs handles the rest)
+        const canvas = document.getElementById('the_canvas_id');
+        // Ensure canvas exists (defensive programming)
+        if (canvas) {
+            // Potentially set canvas size here if needed, though eframe usually handles it
+            // canvas.width = window.innerWidth;
+            // canvas.height = window.innerHeight;
+        } else {
+            console.error("Canvas element 'the_canvas_id' not found.");
+        }
+    </script>
+</body>
+</html> 
