@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(tower_http::trace::TraceLayer::new_for_http()); // Apply tracing
 
     // Define the server address
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3001)); // Use port 3001 for the backend
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8000)); // Changed port to 8000
     info!("Server listening on {}", addr);
 
     // Run the server

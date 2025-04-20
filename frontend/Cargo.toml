@@ -23,6 +23,8 @@ log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 egui_commonmark = { git = "https://github.com/lampsitter/egui_commonmark", branch = "master" }
+ehttp = { version = "0.5", features = ["native-async"] } # Added native-async feature
+urlencoding = "2.1" # Added for URL encoding
 
 # You only need serde if you want app persistence:
 serde = { version = "1", features = ["derive"] }
