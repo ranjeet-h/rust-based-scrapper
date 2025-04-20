@@ -1,8 +1,68 @@
-use crate::processing::{fetch_and_convert, ProcessingError};
 use poll_promise::Promise;
+use serde::{Deserialize, Serialize};
+use std::fmt; // Import fmt for custom error Display
+use serde_json;
+use egui_commonmark::CommonMarkViewer;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{HtmlElement, HtmlAnchorElement};
 
 #[cfg(not(target_arch = "wasm32"))]
-use futures::executor::block_on;
+use printpdf::{Mm, PdfDocument, Point}; // Imports for native PDF generation
+
+// Define the backend URL
+const BACKEND_URL: &str = "http://127.0.0.1:3001";
+
+// Define structs matching Backend API
+#[derive(Serialize, Deserialize, Debug, Clone)] // Need Clone for history
+struct BackendScrapeResponse {
+    id: i64,
+    url: String,
+    content: String, // Markdown content from backend
+}
+
+// Simplified representation for history (can be expanded later)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct HistoryItem {
+    url: String,
+    markdown: String,
+}
+
+// Custom Error type for Frontend operations
+#[derive(Debug)]
+enum FrontendError {
+    Http(reqwest::Error),
+    JsonParse(serde_json::Error), // If using serde_json for response parsing
+    ApiError(String),          // Errors reported by the backend API
+    Other(String),
+}
+
+impl fmt::Display for FrontendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FrontendError::Http(e) => write!(f, "HTTP request failed: {}", e),
+            FrontendError::JsonParse(e) => write!(f, "Failed to parse JSON response: {}", e),
+            FrontendError::ApiError(msg) => write!(f, "API Error: {}", msg),
+            FrontendError::Other(msg) => write!(f, "Error: {}", msg),
+        }
+    }
+}
+
+// Convert reqwest errors
+impl From<reqwest::Error> for FrontendError {
+    fn from(err: reqwest::Error) -> Self {
+        FrontendError::Http(err)
+    }
+}
+
+// Convert serde_json errors (if using it directly)
+impl From<serde_json::Error> for FrontendError {
+    fn from(err: serde_json::Error) -> Self {
+        FrontendError::JsonParse(err)
+    }
+}
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -11,15 +71,19 @@ pub struct TemplateApp {
     // State for the web scraper app
     input_url: String,
     #[serde(skip)] // Avoid serializing potentially large markdown data or promises
-    markdown_content: Option<String>,
+    markdown_content: Option<String>, // Displayed markdown (from selected history or latest scrape)
     #[serde(skip)]
     error_message: Option<String>,
     #[serde(skip)]
-    scrape_promise: Option<Promise<Result<String, ProcessingError>>>,
+    // Update promise type to reflect backend call
+    scrape_promise: Option<Promise<Result<BackendScrapeResponse, FrontendError>>>,
     #[serde(skip)] // Don't persist history for now
-    scrape_history: Vec<(String, String)>, // Store (URL, Title/Summary)
+    // Use HistoryItem struct for clarity
+    scrape_history: Vec<HistoryItem>,
     #[serde(skip)]
     selected_history_index: Option<usize>, // Index of the currently viewed history item
+    #[serde(skip)]
+    is_displaying_result: bool, // Added flag: true if showing result, false if ready for input
 }
 
 impl Default for TemplateApp {
@@ -29,30 +93,18 @@ impl Default for TemplateApp {
             markdown_content: None,
             error_message: None,
             scrape_promise: None,
-            scrape_history: Vec::new(),   // Initialize history
-            selected_history_index: None, // Nothing selected initially
+            scrape_history: Vec::new(),
+            selected_history_index: None,
+            is_displaying_result: false, // Default to ready for input
         }
     }
 }
 
 impl TemplateApp {
     /// Called once before the first frame.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
-
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
-        /* <-- Temporarily disable loading state --> 
-        if let Some(storage) = cc.storage {
-            // Try to load previous state
-            if let Some(state) = eframe::get_value(storage, eframe::APP_KEY) {
-                return state; // Return loaded state
-            }
-        }
-        */
-
-        // If loading failed or was disabled, create a default state
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // TODO: Implement loading history from backend here?
+        // For now, just default state.
         Default::default()
     }
 }
@@ -60,38 +112,40 @@ impl TemplateApp {
 impl eframe::App for TemplateApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Only save non-skipped fields (input_url)
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // --- Handle Promise Resolution ---
+        // --- Handle Promise Resolution --- New Logic ---
         if let Some(promise) = &self.scrape_promise {
             if let Some(result) = promise.ready() {
                 match result {
-                    Ok(markdown) => {
-                        let url = self.input_url.clone(); // Assuming input_url holds the URL for the finished promise
-                        self.markdown_content = Some(markdown.clone());
+                    // Success case: Backend returned a valid response
+                    Ok(response) => {
+                        let history_item = HistoryItem {
+                            url: response.url.clone(),
+                            markdown: response.content.clone(),
+                        };
+                        self.markdown_content = Some(response.content.clone()); // Update display
                         self.error_message = None;
-                        // Add to history (use URL as title for now)
-                        // Prevent duplicates if the exact same URL was just scraped
-                        if self
-                            .scrape_history
-                            .last()
-                            .map_or(true, |(last_url, _)| last_url != &url)
-                        {
-                            // Store the full markdown for now to allow switching back
-                            // Consider storing only a summary later for performance
-                            self.scrape_history.push((url.clone(), markdown.clone()));
+                        self.is_displaying_result = true; // Set flag on success
+
+                        // Add to history, preventing exact duplicates
+                        if self.scrape_history.last().map_or(true, |last| last.url != history_item.url) {
+                            self.scrape_history.push(history_item);
                         }
                         // Automatically select the latest history item
                         self.selected_history_index = Some(self.scrape_history.len() - 1);
                     }
+                    // Failure case: Promise returned an error (HTTP, JSON, API, etc.)
                     Err(e) => {
                         log::error!("Scraping failed: {}", e);
-                        self.error_message = Some(format!("{}", e));
+                        self.error_message = Some(format!("{}", e)); // Use Display impl of FrontendError
                         self.markdown_content = None; // Clear content on error
                         self.selected_history_index = None; // De-select history on error
+                        self.is_displaying_result = false; // Clear flag on error
                     }
                 }
                 // Promise is finished, remove it
@@ -101,33 +155,16 @@ impl eframe::App for TemplateApp {
         // --- End Handle Promise Resolution ---
 
         // Determine if currently loading
-        let is_loading = self.scrape_promise.is_some()
-            && self
-                .scrape_promise
-                .as_ref()
-                .map_or(false, |p| p.ready().is_none());
+        let is_loading = self.scrape_promise.is_some() && self.scrape_promise.as_ref().map_or(false, |p| p.ready().is_none());
 
-        // --- Top Panel for Header ---
+        // --- Top Panel (unchanged) ---
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.heading("Ruscraper");
-                // ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                //     // Quit Button for non-web
-                //     let is_web = cfg!(target_arch = "wasm32");
-                //     if !is_web {
-                //         if ui.button("Quit").clicked() {
-                //             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                //         }
-                //     }
-                //     // Theme switcher
-                //     // egui::widgets::global_theme_preference_buttons(ui);
-                //     ui.add_space(16.0);
-                // });
             });
         });
-        // --- End Top Panel ---
 
-        // --- Left Panel for History ---
+        // --- Left Panel for History - Adjusted for HistoryItem ---
         egui::SidePanel::left("history_panel")
             .resizable(false)
             .default_width(300.0)
@@ -141,166 +178,157 @@ impl eframe::App for TemplateApp {
                     } else {
                         // Iterate in reverse to show newest first
                         for i in (0..self.scrape_history.len()).rev() {
-                            let (url, _content) = &self.scrape_history[i];
-                            // Use URL as the label for now
-                            let display_url = url.splitn(4, '/').nth(2).unwrap_or(url).to_string(); // Show domain or full url
+                            let item = &self.scrape_history[i];
+                            let display_url = item.url.splitn(4, '/').nth(2).unwrap_or(&item.url).to_string();
                             let label_text = format!("{}: {}", i + 1, display_url);
-
-                            // Highlight the selected item
                             let is_selected = self.selected_history_index == Some(i);
 
                             ui.horizontal(|ui| {
-                                // Selectable Label takes up most space
                                 if ui.selectable_label(is_selected, label_text).clicked() {
                                     self.selected_history_index = Some(i);
-                                    // Update main content view when history item is clicked
-                                    self.markdown_content = Some(self.scrape_history[i].1.clone());
-                                    self.error_message = None; // Clear error when viewing history
-                                    self.input_url = self.scrape_history[i].0.clone();
-                                    // Optionally update input field
+                                    self.markdown_content = Some(item.markdown.clone());
+                                    self.error_message = None;
+                                    self.input_url = item.url.clone(); // Update input field when selecting history
                                 }
-
-                                // Action buttons for the history item (only if selected for now? or always? Let's show always)
+                                // TODO: Add backend calls for Export/Delete later
                                 ui.add_enabled(!is_loading, egui::Button::new("MD").small())
-                                    .on_hover_text("Export Markdown")
-                                    .clicked()
-                                    .then(|| {
-                                        log::info!("Export MD clicked for index {}", i);
-                                        // TODO: Implement MD export for scrape_history[i]
-                                    });
+                                    .on_hover_text("Export Markdown (NYI)");
                                 ui.add_enabled(!is_loading, egui::Button::new("PDF").small())
-                                    .on_hover_text("Export PDF")
-                                    .clicked()
-                                    .then(|| {
-                                        log::info!("Export PDF clicked for index {}", i);
-                                        self.error_message =
-                                            Some("PDF export not implemented yet.".to_string());
-                                        // TODO: Implement PDF export for scrape_history[i]
-                                    });
+                                    .on_hover_text("Export PDF (NYI)");
                                 ui.add_enabled(!is_loading, egui::Button::new("🗑").small())
-                                    .on_hover_text("Delete History Item")
-                                    .clicked()
-                                    .then(|| {
-                                        log::warn!("Delete clicked for index {}", i);
-                                        // TODO: Implement deletion logic (need mutable borrow or delayed action)
-                                        // self.scrape_history.remove(i); // Cannot borrow mutably here
-                                        self.error_message =
-                                            Some("Delete not implemented yet.".to_string());
-                                    });
-                            }); // End horizontal layout for item + buttons
+                                    .on_hover_text("Delete History Item (NYI)");
+                            });
                         }
                     }
                 });
             });
-        // --- End Left Panel ---
 
-        // --- Bottom Panel for Input, Controls, and Errors ---
+        // --- Bottom Panel for Input, Controls, and Errors --- Updated Scrape Logic ---
         egui::TopBottomPanel::bottom("input_panel")
-            .resizable(false) // Typically fixed height
+            .resizable(false)
             .show(ctx, |ui| {
-                // Add some padding/margin around the panel contents
                 ui.add_space(5.0);
                 let panel_frame = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 5));
                 panel_frame.show(ui, |ui| {
-                    // Display Error Messages just above the input
                     if let Some(err) = &self.error_message {
                         ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
                         ui.add_space(2.0);
                     }
 
-                    // Input Row: URL field and Scrape button
                     ui.horizontal(|ui| {
-                        // --- URL Input takes remaining space ---
                         let available_width = ui.available_width();
-                        let desired_input_width = (available_width - 100.0).max(0.0); // Ensure non-negative width
-                        let input_height = 35.0;
-                        
-                        ui.add_enabled_ui(!is_loading, |ui| {
-                            let mut text_edit = egui::TextEdit::singleline(&mut self.input_url)
-                                .hint_text("Enter URL to scrape...");
-                            // Use add_sized within the enabled_ui closure
-                            let url_input_response = ui.add_sized([desired_input_width, input_height], text_edit);
-                            // Store response outside the closure if needed later (e.g., for focus check)
-                            ui.memory_mut(|mem| mem.data.insert_temp("url_input_response_id".into(), url_input_response));
-                        });
-                        // Retrieve the response
-                        let url_input_response: egui::Response = ui.memory_mut(|mem| mem.data.get_temp("url_input_response_id".into()).unwrap());
+                        let desired_input_width = (available_width - 100.0f32).max(0.0f32);
+                        // let input_height = 35.0f32; // Removed, seems unused now
 
-                        // --- End URL Input ---
-                        
-                        // --- Button on the right first ---
-                        let mut button_clicked = false; // Initialize placeholder
+                        // Use add_enabled_ui to create a conditionally enabled scope
+                        let mut inner_response: Option<egui::Response> = None;
+                        // Input field enabled only when not loading and not displaying result
+                        let outer_response = ui.add_enabled_ui(!is_loading && !self.is_displaying_result, |ui| {
+                            // Add the widget directly with desired width and height
+                             let response = ui.add(
+                                 egui::TextEdit::singleline(&mut self.input_url)
+                                     .desired_width(desired_input_width)
+                                     .min_size(egui::vec2(0.0, 35.0)) // Set minimum height to match button
+                                     .hint_text("Enter URL to scrape...")
+                             );
+                             inner_response = Some(response); // Store the inner response
+                        });
+
+                        // Use the inner response if the UI was enabled, otherwise use the outer one (which might indicate disabled state)
+                        let url_input_response = inner_response.unwrap_or(outer_response.response);
+
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            // Scrape Button (takes its natural width)
-                            let scrape_button =
-                                egui::Button::new(if is_loading { "..." } else { "Send" })
-                                    .min_size(egui::vec2(100.0, 35.0)) // Set minimum height, natural width
-                                    .corner_radius(egui::epaint::CornerRadius::same(
-                                        ui.style().visuals.widgets.inactive.corner_radius.ne,
-                                    ));
+                            if self.is_displaying_result {
+                                // Show "New +" button when displaying a result
+                                let new_button = egui::Button::new("➕ New")
+                                    .min_size(egui::vec2(100.0, 35.0));
+                                if ui.add(new_button).clicked() {
+                                    // Reset state for a new scrape
+                                    self.input_url.clear(); // Ensure input is clear
+                                    self.markdown_content = None;
+                                    self.error_message = None;
+                                    self.selected_history_index = None;
+                                    self.is_displaying_result = false;
+                                }
+                            } else {
+                                // Show "Send" button when ready for input
+                                let scrape_button = egui::Button::new(if is_loading { "..." } else { "Send" })
+                                    .min_size(egui::vec2(100.0, 35.0));
+                                let button_response = ui.add_enabled(!is_loading && !self.input_url.trim().is_empty(), scrape_button)
+                                    .on_hover_text("Call backend to fetch and process URL");
 
-                            // Add the button and capture if it was clicked
-                            button_clicked = ui
-                                .add_enabled(
-                                    !is_loading && !self.input_url.trim().is_empty(),
-                                    scrape_button,
-                                )
-                                .on_hover_text("Fetch content and convert to Markdown")
-                                .clicked();
+                                let enter_pressed = url_input_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                                if button_response.clicked() || enter_pressed {
+                                    if !self.input_url.trim().is_empty() {
+                                        self.error_message = None;
+                                        self.markdown_content = None;
+                                        self.selected_history_index = None;
+                                        // No need to set is_displaying_result to false here, happens on promise error
+                                        let url_to_fetch = self.input_url.clone();
+                                        log::info!("Sending scrape request to backend for URL: {}", url_to_fetch);
+
+                                        // --- Create and store the promise --- NEW LOGIC ---
+                                        let promise = {
+                                            let request_url = format!("{}/scrape", BACKEND_URL);
+                                            let _client = reqwest::Client::new(); // Prefix with underscore as it's only used in spawn_async
+                                            let request_payload = serde_json::json!({ "url": url_to_fetch });
+
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            {
+                                                Promise::spawn_thread("backend_scrape", move || {
+                                                    // Use blocking client for simplicity in spawn_thread
+                                                    let blocking_client = reqwest::blocking::Client::new();
+                                                    let resp = blocking_client.post(&request_url)
+                                                        .json(&request_payload)
+                                                        .send()?;
+
+                                                    if resp.status().is_success() {
+                                                        let parsed = resp.json::<BackendScrapeResponse>()?;
+                                                        Ok(parsed)
+                                                    } else {
+                                                        let err_text = resp.text()?;
+                                                        log::error!("Backend API error: {}", err_text);
+                                                        Err(FrontendError::ApiError(err_text))
+                                                    }
+                                                })
+                                            }
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                Promise::spawn_async(async move {
+                                                    // Create the client inside the async block for wasm
+                                                    let client = reqwest::Client::new(); 
+                                                    let resp = client.post(&request_url)
+                                                        .json(&request_payload)
+                                                        .send()
+                                                        .await?;
+
+                                                    if resp.status().is_success() {
+                                                        let parsed = resp.json::<BackendScrapeResponse>().await?;
+                                                        Ok(parsed)
+                                                    } else {
+                                                         let err_text = resp.text().await?;
+                                                         log::error!("Backend API error: {}", err_text);
+                                                         Err(FrontendError::ApiError(err_text))
+                                                    }
+                                                })
+                                            }
+                                        };
+                                        self.scrape_promise = Some(promise);
+                                        // self.input_url.clear(); // Already cleared outside this block
+                                    }
+                                }
+                            }
                         });
-                        // --- End Button Layout ---
-
-                        // Check if enter was pressed in the text input OR the button was clicked
-                        let enter_pressed = url_input_response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-                        if button_clicked || enter_pressed {
-                            // Set loading state implicitly by creating the promise
-                            self.error_message = None;
-                            self.markdown_content = None; // Clear display while loading
-                            self.selected_history_index = None; // De-select history when starting new scrape
-                            let url_to_fetch = self.input_url.clone();
-                            log::info!("Spawning promise to fetch URL: {}", url_to_fetch); // Use info level log
-                                                                                           // Create and store the promise
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                self.scrape_promise = Some(Promise::spawn_async(async move {
-                                    fetch_and_convert(url_to_fetch).await
-                                }));
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                self.scrape_promise =
-                                    Some(Promise::spawn_thread("scrape", move || {
-                                        // #[cfg(feature = "tokio")] // Example if using tokio runtime directly - Removed
-                                        // let _rt = tokio::runtime::Runtime::new().unwrap(); // Ensure runtime exists if needed by block_on - Removed
-                                        // Use futures::executor::block_on for simplicity if no async runtime needed directly
-                                        block_on(fetch_and_convert(url_to_fetch))
-                                    }));
-                            }
-                        }
-                        // Loading indicator - now handled by button text/disabled state
-                        // if is_loading { ui.add(egui::Spinner::new()); }
                     });
                     ui.add_space(5.0);
 
-                    // Combined Row for Export Buttons and Theme/Footer
+                     // --- Footer Row (unchanged for now) ---
                     ui.horizontal(|ui| {
-                        // Enable buttons only if there's content *from the selected history* and not loading
-                        let enable_export = self.selected_history_index.is_some() && !is_loading;
-
-                        // Remove the global export buttons, actions are now per-history item
-                        // if ui.add_enabled(enable_export, egui::Button::new("Export Markdown (.md)")).clicked() { ... }
-                        // if ui.add_enabled(enable_export, egui::Button::new("Export PDF")).clicked() { ... }
-
                         // Right-align theme/footer elements
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Footer with egui/eframe attribution
-                            // powered_by_egui_and_eframe(ui);
                             ui.add_space(10.0);
-                            // Theme switcher
                             egui::widgets::global_theme_preference_buttons(ui);
-                            // Quit Button for non-web
                             let is_web = cfg!(target_arch = "wasm32");
                             if !is_web {
                                 if ui.button("Quit").clicked() {
@@ -309,56 +337,198 @@ impl eframe::App for TemplateApp {
                             }
                         });
                     });
-                }); // End inner frame
-                ui.add_space(5.0); // Add some padding below the panel contents
+                });
+                ui.add_space(5.0);
             });
-        // --- End Bottom Panel ---
 
-        // --- Central Panel for the Markdown Output ---
+        // --- Central Panel for the Markdown Output - Adjusted for HistoryItem ---
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Add a subtle frame/background
+            ui.horizontal(|ui| {
+                ui.heading("Scraped Content");
+                // Add Export buttons to the right if displaying a result
+                if self.is_displaying_result {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0); // Spacing before buttons
+                        
+                        // PDF Export Button (Now Enabled)
+                        // let pdf_button = egui::Button::new("📄 PDF");
+                        // if ui.add(pdf_button).on_hover_text("Export as PDF (Basic)").clicked() {
+                        //      if let Some(content) = &self.markdown_content {
+                        //         save_pdf_file("scraped_content.pdf", content);
+                        //     } else {
+                        //         log::warn!("No content available to export as PDF.");
+                        //     }
+                        // }
+                        
+                        // Markdown Export Button
+                        let md_button = egui::Button::new("Ⓜ️ MD");
+                        if ui.add(md_button).on_hover_text("Export as Markdown").clicked() {
+                            if let Some(content) = &self.markdown_content {
+                                save_markdown_file("scraped_content.md", content);
+                            } else {
+                                log::warn!("No markdown content available to export.");
+                            }
+                        }
+                    });
+                }
+            });
+
+            ui.add_space(5.0);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                  egui::ScrollArea::vertical()
                      .stick_to_bottom(true)
-                     .auto_shrink([false, false]) // Fill available space
+                     .auto_shrink([false, false])
                      .show(ui, |ui| {
-                     // Display the markdown content based on selection, or a placeholder
-                     let display_text = if let Some(index) = self.selected_history_index {
-                         self.scrape_history[index].1.as_str() // Show content from history
-                     } else if self.markdown_content.is_some() {
-                         // This case might happen briefly after scrape before selection updates
-                         self.markdown_content.as_deref().unwrap_or("")
-                     } else {
-                         "Scraped content will appear here...\n\nEnter a URL below and click scrape."
-                     };
+                        if is_loading {
+                            ui.add(egui::Spinner::new());
+                            ui.label("Fetching content...");
+                        } else {
+                            let display_text = self.markdown_content.as_deref()
+                                .unwrap_or("Scraped content will appear here...\n\nEnter a URL below and click Send to fetch from backend.");
 
-                     // Use a Label or TextEdit for display. TextEdit allows selection.
-                     // For pure display, Label might be slightly more performant.
-                     // Let's use read-only TextEdit for consistency and text selection.
-                     let mut display_mut = display_text.to_string(); // Need mutable for TextEdit
-                     ui.add_sized(ui.available_size(), // Fill the central panel
-                         egui::TextEdit::multiline(&mut display_mut)
-                             .interactive(false) // Make it read-only
-                             .frame(false) // No frame inside the scroll area frame
-                             .code_editor() // Use a monospace font potentially
-                     );
-                 });
+                            // Use CommonMarkViewer to render the markdown
+                            CommonMarkViewer::new()
+                                .show(ui, &mut egui_commonmark::CommonMarkCache::default(), display_text);
+                        }
+                     });
             });
         });
-        // --- End Central Panel ---
     }
 }
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
+// ---- Helper Function for Saving Files ----
+
+fn save_markdown_file(filename: &str, content: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native: Use rfd to show a save file dialog
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(filename)
+            .add_filter("Markdown", &["md"])
+            .save_file() else {
+            log::info!("User cancelled save dialog.");
+            return;
+        };
+        
+        match std::fs::write(&path, content) {
+            Ok(_) => log::info!("Markdown saved to: {:?}", path),
+            Err(e) => log::error!("Failed to save markdown file: {}", e),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Web: Trigger a download using data URL
+        trigger_download(filename, content);
+    }
 }
+
+// ---- Helper Function for Saving Basic PDF ----
+
+fn save_pdf_file(filename: &str, content: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native: Use rfd for save dialog and printpdf for basic PDF
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(filename)
+            .add_filter("PDF Document", &["pdf"])
+            .save_file() else {
+            log::info!("User cancelled save dialog.");
+            return;
+        };
+
+        match create_basic_pdf(content) {
+            Ok(pdf_bytes) => {
+                match std::fs::write(&path, pdf_bytes) {
+                    Ok(_) => log::info!("PDF saved to: {:?}", path),
+                    Err(e) => log::error!("Failed to write PDF file: {}", e),
+                }
+            }
+            Err(e) => {
+                 log::error!("Failed to generate basic PDF: {}", e);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Web: Trigger download of the raw text with .pdf extension
+        // (This is NOT a real PDF, just the text content)
+        log::warn!("WASM PDF export is basic: downloading raw text with .pdf extension.");
+        trigger_download(filename, content);
+    }
+}
+
+// ---- Helper to create a very basic PDF with printpdf (Native Only) ----
+#[cfg(not(target_arch = "wasm32"))]
+fn create_basic_pdf(content: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (doc, page1, layer1) = PdfDocument::new("Scraped Content", Mm(210.0), Mm(297.0), "Layer 1");
+    let current_layer = doc.get_page(page1).get_layer(layer1);
+
+    // Use a basic built-in font
+    let font = doc.add_builtin_font(printpdf::BuiltinFont::Helvetica)?;
+    let font_size = 10.0;
+    let line_height = 12.0; // Slightly larger than font size
+    let margin_top = 280.0;
+    let margin_bottom = 15.0;
+    let mut y_position = margin_top;
+
+    current_layer.set_font(&font, font_size);
+
+    for line in content.lines() {
+        // Stop if we are too close to the bottom margin
+        if y_position < margin_bottom {
+            log::warn!("PDF content truncated due to reaching page bottom.");
+            break;
+        }
+        // Add the current line
+        current_layer.use_text(line.to_string(), font_size, Mm(10.0), Mm(y_position), &font);
+        // Move down for the next line
+        y_position -= line_height;
+    }
+
+    let pdf_bytes = doc.save_to_bytes()?;
+    Ok(pdf_bytes)
+}
+
+// ---- Helper function for WASM download ----
+#[cfg(target_arch = "wasm32")]
+fn trigger_download(filename: &str, content: &str) {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let window = web_sys::window().expect("no global `window` exists");
+    let document = window.document().expect("should have a document on window");
+    let body = document.body().expect("document should have a body");
+
+    // Create an anchor element
+    let link = document
+        .create_element("a")
+        .expect("Failed to create anchor element")
+        .dyn_into::<HtmlAnchorElement>()
+        .expect("Failed to cast to HtmlAnchorElement");
+
+    // Create a data URL
+    // Using base64 encoding for potentially large/complex markdown
+    let base64_content = general_purpose::STANDARD.encode(content);
+    // Adjust mime type based on filename? Or keep generic?
+    // Forcing text/plain for wasm pdf download as it's not a real pdf.
+    let mime_type = if filename.ends_with(".pdf") {
+         "text/plain" 
+    } else {
+         "text/markdown"
+    }; // Simplification for WASM
+    let href = format!("data:{};charset=utf-8;base64,{}", mime_type, base64_content);
+    
+    link.set_href(&href);
+    link.set_download(filename);
+
+    // Append to body, click, and remove
+    let style = link.style();
+    style.set_property("display", "none").expect("Failed to set style");
+    body.append_child(&link).expect("Failed to append link");
+    link.click();
+    body.remove_child(&link).expect("Failed to remove link");
+    log::info!("Triggered download for {}", filename);
+}
+
+// fn powered_by_egui_and_eframe(ui: &mut egui::Ui) { ... } // Keep if desired
