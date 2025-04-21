@@ -12,6 +12,8 @@ target_wasm
 # https://github.com/lycheeverse/lychee
 .lycheecache
 
-../rust-web-scrapper
+rust-web-scraper
 
 .env
+
+**/.env

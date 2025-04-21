@@ -22,15 +22,25 @@ eframe = { version = "0.31.1", default-features = false, features = [
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
+egui_commonmark = { git = "https://github.com/lampsitter/egui_commonmark", branch = "master" }
+ehttp = { version = "0.5", features = ["native-async"] } # Added native-async feature
+urlencoding = "2.1" # Added for URL encoding
 
 # You only need serde if you want app persistence:
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
 futures = "0.3"
 poll-promise = "0.3"
+rfd = "0.14" # Add rfd for native file dialogs
+printpdf = "0.7.0" # Add printpdf for basic PDF generation
+# Add tokio for native async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Add native-specific reqwest features (including base json)
+reqwest = { version = "=0.12.5", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -39,6 +49,8 @@ web-sys = "0.3.70"           # to access the DOM (to hide the loading text)
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 # Enable wasm-bindgen-futures feature for poll-promise only on wasm32
 poll-promise = { version = "0.3", features = ["wasm-bindgen-futures"] }
+# Add wasm-specific reqwest features (including base json)
+reqwest = { version = "=0.12.5", default-features = false, features = ["json"] }
 
 [profile.release]
 opt-level = 2 # fast and small wasm

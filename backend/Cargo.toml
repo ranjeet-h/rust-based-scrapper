@@ -1,0 +1,18 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7" # Using a recent stable version
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls"] } # Use native-tls for simplicity
+tower-http = { version = "0.5.0", features = ["cors", "trace"] } # For CORS and TraceLayer
+dotenvy = "0.15" # To load environment variables like DATABASE_URL
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false } # For making HTTP requests to scrape
+scraper = "0.19" # For parsing HTML 
+firecrawl = "1.0" # Add Firecrawl SDK 
