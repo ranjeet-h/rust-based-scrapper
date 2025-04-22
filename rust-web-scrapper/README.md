@@ -131,6 +131,16 @@ function Summary({ data }) {
 }
 ```
 
+## Screenshots
+
+Here are some screenshots of the application in action:
+
+![API Request and Response](response_img/Screenshot%202025-04-22%20at%207.22.54%20PM.png)
+
+![Example Summary Output](response_img/Screenshot%202025-04-22%20at%207.23.04%20PM.png)
+
+![Web Interface](response_img/Screenshot%202025-04-22%20at%207.28.10%20PM.png)
+
 ## Dependencies
 
 - axum - Web framework
