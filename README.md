@@ -85,8 +85,11 @@ This directory contains another Rust project, also seemingly an Axum-based web s
     *   Navigate to the `frontend/` directory.
     *   Run `cargo run`.
 
-*(Adjust ports and specific commands as needed)*
 
 ## Usage
 
 *(Describe how to use the application, e.g., opening the frontend, entering a URL, viewing history, etc.)*
+
+## Licensing
+
+This project is dual-licensed under the Apache License 2.0 (`LICENSE-APACHE`) and the MIT license (`LICENSE-MIT`).
