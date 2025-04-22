@@ -1,4 +1,4 @@
-# rust-based-scrapper
+# Ruscraper - A Rust-based web scraper
 
 This repository contains a web scraping application built with Rust, consisting of a frontend UI, a backend API service, and potentially a separate core scraping library/service.
 
